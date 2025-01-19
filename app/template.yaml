@@ -1,0 +1,530 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "URL shortener"
+
+
+Parameters:
+  Database:
+    Type: String
+    Default: "url-shortener-db"
+  StageName:
+    Type: String
+    Default: "app"
+
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "PK"
+          AttributeType: "S"
+        - AttributeName: "GSI1PK"
+          AttributeType: "S"
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: "GSI1PK"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: ALL
+      KeySchema:
+        - AttributeName: "PK"
+          KeyType: "HASH"
+      TableName: !Ref Database
+
+  ReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Policies:
+        - PolicyName: TableReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Database}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Database}/index/GSI1"
+
+  WriteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Policies:
+        - PolicyName: TableWritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - dynamodb:DeleteItem
+                  - dynamodb:UpdateItem
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Database}"
+
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "url-shortener"
+      Description: "URL shortener"
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: "url-shortener-pool"
+      AutoVerifiedAttributes:
+        - email
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: "url-shortener-app"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - email
+        - openid
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - "https://example.com/callback" # placeholder
+      LogoutURLs:
+        - "https://example.com/logout" # placeholder
+
+  Authorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: "main"
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+      RestApiId: !Ref Api
+      Type: COGNITO_USER_POOLS
+
+  Link:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      Description: "Create Link request payload"
+      Name: "Link"
+      RestApiId: !Ref Api
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: "Link"
+        type: object
+        properties:
+          url:
+            type: string
+            minLength: 1
+          id:
+            type: string
+            minLength: 1
+        required:
+          - id
+          - url
+
+  Url:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      Description: "Edit Link request payload"
+      Name: "Url"
+      RestApiId: !Ref Api
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: "Url"
+        type: object
+        properties:
+          url:
+            type: string
+            minLength: 1
+        required:
+          - url
+
+  FullValidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties:
+      Name: "full-validator"
+      RestApiId: !Ref Api
+      ValidateRequestBody: true
+      ValidateRequestParameters: true
+
+  LinkListResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: "links"
+      RestApiId: !Ref Api
+
+  LinkDetailResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref LinkListResource
+      PathPart: "{link}"
+      RestApiId: !Ref Api
+
+  CreateLinkMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref Authorizer
+      HttpMethod: "POST"
+      Integration:
+        Credentials: !GetAtt WriteRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$.Attributes'))
+                {
+                  "id": "$response.PK.S",
+                  "url": "$response.url.S",
+                  "timestamp": "$response.timestamp.S",
+                  "owner": "$response.GSI1PK.S"
+                }
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                #if($response.toString().contains("ConditionalCheckFailedException"))
+                  {
+                    "error": true,
+                    "message": "URL already exists"
+                  }
+                #end
+            SelectionPattern: "4\\d{2}"
+            StatusCode: "400"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($userId = $context.authorizer.claims.email)
+            {
+              "TableName": "${Database}",
+              "ConditionExpression": "attribute_not_exists(PK)",
+              "Key": {
+                "PK": {
+                  "S": $input.json('$.id')
+                }
+              },
+              "ExpressionAttributeNames": {
+                "#u": "url",
+                "#o": "GSI1PK",
+                "#ts": "timestamp"
+              },
+              "ExpressionAttributeValues": {
+                ":u": {
+                  "S": $input.json('$.url')
+                },
+                ":o": {
+                  "S": "$userId"
+                },
+                ":ts": {
+                  "S": "$context.requestTime"
+                }
+              },
+              "ReturnValues": "ALL_NEW",
+              "UpdateExpression": "SET #u = :u, #o = :o, #ts = :ts"
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/UpdateItem"
+      MethodResponses:
+        - StatusCode: "200"
+        - StatusCode: "400"
+      OperationName: "make-link"
+      RequestModels:
+        application/json: !Ref Link
+      RequestValidatorId: !Ref FullValidator
+      ResourceId: !Ref LinkListResource
+      RestApiId: !Ref Api
+
+  EditLinkMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref Authorizer
+      HttpMethod: "PUT"
+      Integration:
+        Credentials: !GetAtt WriteRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: |
+                #set($response = $input.path('$.Attributes'))
+                {
+                  "id": "$response.PK.S",
+                  "url": "$response.url.S",
+                  "timestamp": "$response.timestamp.S",
+                  "owner": "$response.GSI1PK.S"
+                }
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+          - ResponseTemplates:
+              application/json: |
+                #set($response = $input.path('$'))
+                #if($response.toString().contains("ConditionalCheckFailedException"))
+                  {
+                    "error": true,
+                    "message": "You do not have permission to do this"
+                  }
+                #end
+            SelectionPattern: "4\\d{2}"
+            StatusCode: "400"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($userId = $context.authorizer.claims.email)
+            {
+              "TableName": "${Database}",
+              "Key": {
+                "PK": {
+                  "S": "$input.params().path.link"
+                }
+              },
+              "ExpressionAttributeNames": {
+                "#url": "url",
+                "#owner": "GSI1PK",
+                "#id": "PK"
+              },
+              "ExpressionAttributeValues": {
+                ":url": {
+                  "S": $input.json('$.url')
+                },
+                ":owner": {
+                  "S": "$userId"
+                },
+                ":link": {
+                  "S": "$input.params().path.link"
+                }
+              },
+              "ReturnValues": "ALL_NEW",
+              "ConditionExpression": "#owner = :owner AND #id = :link",
+              "UpdateExpression": "SET #url = :url"
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/UpdateItem"
+      MethodResponses:
+        - StatusCode: "200"
+        - StatusCode: "400"
+      OperationName: "edit-link"
+      RequestModels:
+        application/json: !Ref Url
+      RequestValidatorId: !Ref FullValidator
+      ResourceId: !Ref LinkDetailResource
+      RestApiId: !Ref Api
+
+  DeleteLinkMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref Authorizer
+      HttpMethod: "DELETE"
+      Integration:
+        Credentials: !GetAtt WriteRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($context.responseOverride.status = 204)
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+          - ResponseTemplates:
+              application/json: |
+                #set($response = $input.path('$'))
+                #if($response.toString().contains("ConditionalCheckFailedException"))
+                  {
+                    "error": true,
+                    "message": "You do not have permission to do this"
+                  }
+                #end
+            SelectionPattern: "4\\d{2}"
+            StatusCode: "400"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($userId = $context.authorizer.claims.email)
+            {
+              "TableName": "${Database}",
+              "Key": {
+                "PK": {
+                  "S": "$input.params().path.link"
+                }
+              },
+              "ExpressionAttributeNames": {
+                "#owner": "GSI1PK"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "$userId"
+                }
+              },
+              "ConditionExpression": "#owner = :owner"
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/DeleteItem"
+      MethodResponses:
+        - StatusCode: "200"
+        - StatusCode: "400"
+      OperationName: "delete-link"
+      ResourceId: !Ref LinkDetailResource
+      RestApiId: !Ref Api
+
+  GetLinksMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref Authorizer
+      HttpMethod: "GET"
+      Integration:
+        Credentials: !GetAtt ReadRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($items = $input.path('$.Items'))
+                {
+                  "links": [
+                    #foreach($item in $items) {
+                      "id": "$item.PK.S",
+                      "url": "$item.url.S",
+                      "timestamp": "$item.timestamp.S"
+                    }#if ($foreach.hasNext),#end
+                    #end
+                  ]
+                }
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($userId = $context.authorizer.claims.email)
+            {
+              "TableName": "${Database}",
+              "IndexName": "GSI1",
+              "KeyConditionExpression": "#owner = :owner",
+              "ExpressionAttributeNames": {
+                "#owner": "GSI1PK"
+              },
+              "ExpressionAttributeValues": {
+                ":owner": {
+                  "S": "$userId"
+                }
+              }
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/Query"
+      MethodResponses:
+        - StatusCode: "200"
+      OperationName: "get-links"
+      ResourceId: !Ref LinkListResource
+      RestApiId: !Ref Api
+
+  RedirectResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: "{link}"
+      RestApiId: !Ref Api
+
+  RedirectMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: "GET"
+      Integration:
+        Credentials: !GetAtt ReadRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseParameters:
+              # placeholder
+              method.response.header.Location: "''"
+            ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                #if ($response.toString().contains("Item"))
+                    #set($context.responseOverride.header.Location = $response.Item.url.S)
+                #end
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "301"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            {
+              "TableName": "${Database}",
+              "Key": {
+                "PK": {
+                  "S": "$input.params().path.link"
+                }
+              },
+              "ProjectionExpression": "PK, #url",
+              "ExpressionAttributeNames": {
+                "#url": "url"
+              }
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/GetItem"
+      MethodResponses:
+        - ResponseParameters:
+            method.response.header.Location: true
+          StatusCode: "301"
+      OperationName: "link-redirect"
+      ResourceId: !Ref RedirectResource
+      RestApiId: !Ref Api
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - LinkListResource
+      - CreateLinkMethod
+    Properties:
+      RestApiId: !Ref Api
+
+  Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref Api
+      StageName: !Ref StageName
+      DeploymentId: !Ref Deployment
+
+Outputs:
+  UserPool:
+    Description: AWS Cognito user pool ID
+    Value: !GetAtt UserPool.UserPoolId
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPool"
+  UserPoolClient:
+    Description: AWS Cognito user pool app ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClient"
+  Api:
+    Description: URL shortener API URL
+    Value: !Ref Api
+    Export:
+      Name: !Sub "${AWS::StackName}-Api"
