@@ -6,3 +6,5 @@
 **/.aws-sam
 **/samconfig.toml
 
+# JetBrains IDE
+.idea/
