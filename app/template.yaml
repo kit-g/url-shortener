@@ -224,6 +224,28 @@ Resources:
           - email
           - password
 
+  ConfirmSignUp:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      Description: "Confirm Sign up data bundle"
+      Name: "ConfirmSignUp"
+      RestApiId: !Ref Api
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: "ConfirmSignUp"
+        type: object
+        properties:
+          email:
+            type: string
+            minLength: 3
+          confirmationCode:
+            type: string
+            minLength: 3
+        required:
+          - email
+          - confirmationCode
+
   AuthResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -243,6 +265,13 @@ Resources:
     Properties:
       ParentId: !Ref AuthResource
       PathPart: "sign-in"
+      RestApiId: !Ref Api
+
+  ConfirmUserResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref AuthResource
+      PathPart: "confirm"
       RestApiId: !Ref Api
 
   FullValidator:
@@ -372,6 +401,61 @@ Resources:
         application/json: !Ref SignUp
       RequestValidatorId: !Ref FullValidator
       ResourceId: !Ref SignInResource
+      RestApiId: !Ref Api
+
+  ConfirmUserMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: "POST"
+      Integration:
+        Credentials: !GetAtt CognitoRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                {
+                  "message": "User confirmed successfully"
+                }
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                #if($response.toString().contains("CodeMismatchException"))
+                  {
+                    "error": true,
+                    "message": "Invalid confirmation code"
+                  }
+                #elseif($response.toString().contains("ExpiredCodeException"))
+                  {
+                    "error": true,
+                    "message": "Confirmation code expired"
+                  }
+                #end
+            SelectionPattern: "4\\d{2}"
+            StatusCode: "400"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($headers = {"X-Amz-Target": "AWSCognitoIdentityProviderService.ConfirmSignUp"})
+
+            {
+              "ClientId": "${UserPoolClient}",
+              "Username": "$input.path('$.email')",
+              "ConfirmationCode": "$input.path('$.confirmationCode')"
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:cognito-idp:action/ConfirmSignUp"
+      MethodResponses:
+        - StatusCode: "200"
+        - StatusCode: "400"
+      OperationName: "confirm-user"
+      RequestModels:
+        application/json: !Ref ConfirmSignUp
+      RequestValidatorId: !Ref FullValidator
+      ResourceId: !Ref ConfirmUserResource
       RestApiId: !Ref Api
 
   LinkListResource:
