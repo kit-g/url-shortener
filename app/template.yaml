@@ -9,6 +9,18 @@ Parameters:
   StageName:
     Type: String
     Default: "app"
+  DomainName:
+    Type: String
+    Default: ""
+  SslCertificate:
+    Type: String
+    Default: ""
+
+
+Conditions:
+  HasCustomDomainName: !And
+    - !Not [ !Equals [ !Ref DomainName, "" ] ]
+    - !Not [ !Equals [ !Ref SslCertificate, "" ] ]
 
 
 Resources:
@@ -512,6 +524,23 @@ Resources:
       StageName: !Ref StageName
       DeploymentId: !Ref Deployment
 
+  CustomDomainName:
+    Condition: HasCustomDomainName
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      CertificateArn: !Ref SslCertificate
+      DomainName: !Ref DomainName
+      SecurityPolicy: TLS_1_2
+
+  PathMapping:
+    Condition: HasCustomDomainName
+    Type: AWS::ApiGateway::BasePathMapping
+    DependsOn: Deployment
+    Properties:
+      DomainName: !Ref CustomDomainName
+      RestApiId: !Ref Api
+      Stage: !Ref Stage
+
 Outputs:
   UserPool:
     Description: AWS Cognito user pool ID
@@ -528,3 +557,8 @@ Outputs:
     Value: !Ref Api
     Export:
       Name: !Sub "${AWS::StackName}-Api"
+  DomainName:
+    Description: API's CloudFront DNS name
+    Value: !GetAtt CustomDomainName.DistributionDomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-DomainName"

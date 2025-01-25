@@ -61,6 +61,10 @@ project. We'll create a user manually later.
     s3_bucket = "..." # TODO your SAM bucket name
     s3_prefix = "url-shortener"
     region = "ca-central-1" # TODO your AWS region
+    parameter_overrides = """
+        DomainName=\"<maybe your custom DNS name>\"
+        SslCertificate=\"<the SSL certificate ARN in ACM>\"
+    """
     confirm_changeset = true
     capabilities = "CAPABILITY_IAM"
     ```

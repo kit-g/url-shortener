@@ -1,4 +1,5 @@
 PROFILE=$1
+ENV=dev
 
 TEMP_DIR=".aws-sam"
 
