@@ -57,8 +57,6 @@ Resources:
                 - apigateway.amazonaws.com
             Action:
               - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
       Policies:
         - PolicyName: TableReadPolicy
           PolicyDocument:
@@ -97,6 +95,31 @@ Resources:
                 Effect: Allow
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Database}"
+
+  CognitoRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CognitoPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - "cognito-idp:SignUp"
+                  - "cognito-idp:InitiateAuth"
+                  - "cognito-idp:ConfirmSignUp"
+                  - "cognito-idp:ResendConfirmationCode"
+                Effect: Allow
+                Resource: "*"
 
   Api:
     Type: AWS::ApiGateway::RestApi
@@ -179,6 +202,42 @@ Resources:
         required:
           - url
 
+  SignUp:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      Description: "Sign up data bundle"
+      Name: "SignUp"
+      RestApiId: !Ref Api
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: "SignUp"
+        type: object
+        properties:
+          email:
+            type: string
+            minLength: 3
+          password:
+            type: string
+            minLength: 3
+        required:
+          - email
+          - password
+
+  AuthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: "auth"
+      RestApiId: !Ref Api
+
+  SignUpResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref AuthResource
+      PathPart: "sign-up"
+      RestApiId: !Ref Api
+
   FullValidator:
     Type: AWS::ApiGateway::RequestValidator
     Properties:
@@ -186,6 +245,63 @@ Resources:
       RestApiId: !Ref Api
       ValidateRequestBody: true
       ValidateRequestParameters: true
+
+  SignUpMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: "POST"
+      Integration:
+        Credentials: !GetAtt CognitoRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                {
+                  "userId": "$response.UserSub"
+                }
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                #if($response.toString().contains("UsernameExistsException"))
+                  {
+                    "error": true,
+                    "message": "User already exists""
+                  }
+                #end
+            SelectionPattern: "4\\d{2}"
+            StatusCode: "400"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($headers = {"X-Amz-Target": "AWSCognitoIdentityProviderService.SignUp"})
+            
+            {
+              "ClientId": "${UserPoolClient}", 
+              "Username": "$input.path('$.email')",
+              "Password": "$input.path('$.password')",
+              "UserAttributes": [
+                {
+                  "Name": "email",
+                  "Value": "$input.path('$.email')"
+                }
+              ]
+            }
+
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:cognito-idp:action/SignUp"
+      MethodResponses:
+        - StatusCode: "200"
+        - StatusCode: "400"
+      OperationName: "sign-up"
+      RequestModels:
+        application/json: !Ref SignUp
+      RequestValidatorId: !Ref FullValidator
+      ResourceId: !Ref SignUpResource
+      RestApiId: !Ref Api
 
   LinkListResource:
     Type: AWS::ApiGateway::Resource
