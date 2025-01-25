@@ -238,6 +238,13 @@ Resources:
       PathPart: "sign-up"
       RestApiId: !Ref Api
 
+  SignInResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref AuthResource
+      PathPart: "sign-in"
+      RestApiId: !Ref Api
+
   FullValidator:
     Type: AWS::ApiGateway::RequestValidator
     Properties:
@@ -301,6 +308,70 @@ Resources:
         application/json: !Ref SignUp
       RequestValidatorId: !Ref FullValidator
       ResourceId: !Ref SignUpResource
+      RestApiId: !Ref Api
+
+  SignInMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: "POST"
+      Integration:
+        Credentials: !GetAtt CognitoRole.Arn
+        IntegrationHttpMethod: "POST"
+        IntegrationResponses:
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$.AuthenticationResult'))
+                {
+                  "accessToken": "$response.AccessToken",
+                  "expiresIn": "$response.ExpiresIn",
+                  "idToken": "$response.IdToken",
+                  "RefreshToken": "$response.RefreshToken",
+                  "tokenType": "$response.TokenType"
+                }
+            SelectionPattern: "2\\d{2}"
+            StatusCode: "200"
+          - ResponseTemplates:
+              application/json: !Sub |
+                #set($response = $input.path('$'))
+                #if($response.toString().contains("InvalidParameterException"))
+                  {
+                    "error": true,
+                    "message": "Invalid username or password"
+                  }
+                #end
+                #if($response.toString().contains("UserNotConfirmedException"))
+                  {
+                    "error": true,
+                    "message": "User is not confirmed"
+                  }
+                #end
+
+            SelectionPattern: "4\\d{2}"
+            StatusCode: "400"
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        RequestTemplates:
+          application/json: !Sub |
+            #set($headers = {"X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"})
+
+            {
+              "AuthFlow": "USER_PASSWORD_AUTH",
+              "ClientId": "${UserPoolClient}", 
+              "AuthParameters": {
+                "USERNAME": "$input.path('$.email')",
+                "PASSWORD": "$input.path('$.password')"
+              }
+            }
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:cognito-idp:action/InitiateAuth"
+      MethodResponses:
+        - StatusCode: "200"
+        - StatusCode: "400"
+      OperationName: "sign-in"
+      RequestModels:
+        application/json: !Ref SignUp
+      RequestValidatorId: !Ref FullValidator
+      ResourceId: !Ref SignInResource
       RestApiId: !Ref Api
 
   LinkListResource:
