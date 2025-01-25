@@ -35,7 +35,6 @@ project. We'll create a user manually later.
 - [AWS CLI](https://aws.amazon.com/cli/) installed and configured with appropriate credentials.
 - [SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html) (optional,
   for easier deployment).
-- Basic knowledge of AWS CloudFormation and API Gateway.
 
 ### Deployment
 
@@ -97,59 +96,77 @@ The API has the following structure
 
 ### Usage
 
-1. First, we'll manually create a Cognito user to test.
-    - AWS Cognito console -> Users -> Create User
-    - Create a user and take note of the password. Don't forget to add email to that user, because we use it as the
-      user's key. Our API will break without it.
-    - Then, using values our SAM deployment script returned:
-      ```shell
-      aws cognito-idp admin-initiate-auth \
-      --user-pool-id <user-pool-id> \
-      --client-id <user-pool-client-id> \
-      --auth-flow ADMIN_NO_SRP_AUTH \
-      --auth-parameters USERNAME="<username>",PASSWORD="<password>"```
+1. First, we'll sign up:
 
-    - this will probably tell you that you need to reset your password. You can do it with (grab the `Session` value
-      from previous command)
-      ```shell
-      aws cognito-idp admin-respond-to-auth-challenge \
-      --user-pool-id <user-pool-id> \
-      --client-id <user-pool-client-id> \
-      --challenge-name NEW_PASSWORD_REQUIRED \
-      --challenge-responses USERNAME="<username>",NEW_PASSWORD="<password>" \
-      --session "<session>"
-      ```
-
-    - this should return a bunch of tokens. We need `IdToken`. If it expires, you can fetch a new one with the previous
-      script.
-
-    - **NB**: this is by no means a proper way to set up Cognito with a project, but it works for our little app
-
-    - time to test:
     ```shell
-      API_URL="https://<api_id>.execute-api.<region>.amazonaws.com/app/links" 
-      AUTH_TOKEN="<id_token>" 
-      REQUEST_BODY='{
-          "id" :"cats",
-          "url": "https://www.youtube.com/results?search_query=cat+videos"
-      }' 
-         
-      curl -X POST "$API_URL" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $AUTH_TOKEN" \
-        -d "$REQUEST_BODY"
-    ```
-   If everything is correct, you should see something like:
-    ```
-    {
-      "id": "cats", --our link id
-      "url": "https://www.youtube.com/results?search_query=cat+videos",
-      "timestamp": "20/Jan/2025:01:08:27 +0000",
-      "owner": "user@mail.com"
-    }
+    API_URL="https://<api_id>.execute-api.<region>.amazonaws.com/app/auth/sign-up" 
+    REQUEST_BODY='{
+        "email" :"my@email.com",
+        "password": "my password"
+    }' 
+       
+    curl -X POST "$API_URL" \
+      -H "Content-Type: application/json" \
+      -d "$REQUEST_BODY"
     ```
 
-   Now if you paste `https://<api_id>.execute-api.<region>.amazonaws.com/app/cats` into the browser, it should take you
-   to your link.
+2. If we get a 200 response, Cognito will also send us a confirmation email. Then:
+
+    ```shell
+    API_URL="https://<api_id>.execute-api.<region>.amazonaws.com/app/auth/confirm" 
+    REQUEST_BODY='{
+        "email" :"my@email.com",
+        "confirmationCode": "my code from the email"
+    }' 
+       
+    curl -X POST "$API_URL" \
+      -H "Content-Type: application/json" \
+      -d "$REQUEST_BODY"
+    ```
+
+3. Now to get a session:
+
+    ```shell
+    API_URL="https://<api_id>.execute-api.<region>.amazonaws.com/app/auth/sig-in" 
+    REQUEST_BODY='{
+        "email" :"my@email.com",
+        "password": "my password"
+    }' 
+       
+    curl -X POST "$API_URL" \
+      -H "Content-Type: application/json" \
+      -d "$REQUEST_BODY"
+    ```
+
+4. In case of success, we'll get a bunch of tokens - we need `idToken`. Time to test:
+
+    ```shell
+    API_URL="https://<api_id>.execute-api.<region>.amazonaws.com/app/links" 
+    AUTH_TOKEN="<id_token>" 
+    REQUEST_BODY='{
+        "id" :"cats",
+        "url": "https://www.youtube.com/results?search_query=cat+videos"
+    }' 
+       
+    curl -X POST "$API_URL" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $AUTH_TOKEN" \
+      -d "$REQUEST_BODY"
+    ```
+
+If everything is correct, we should see something like:
+
+ ```
+ {
+   "id": "cats", --our link id
+   "url": "https://www.youtube.com/results?search_query=cat+videos",
+   "timestamp": "20/Jan/2025:01:08:27 +0000",
+   "owner": "user@mail.com"
+ }
+ ```
+
+Now if you paste `https://<api_id>.execute-api.<region>.amazonaws.com/app/cats` into the browser, it should take you
+to your link. Here's an example - https://s.muffin.vin/cats (this is a custom domain attached to this API, see the
+details in the template.)
 
 No compute at all, not a single Lambda!
